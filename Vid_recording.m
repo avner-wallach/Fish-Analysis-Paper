@@ -1,0 +1,356 @@
+adir='20190624'; seg=6; fnum=9; ss=13760; spkgroup=1; chid=1; rastind=[1:2];
+% script for visualizing freely moving recordings
+apath='Z:\analysis_data';
+if(~exist('eod'))
+    load([apath,filesep,adir,filesep,'output'],'ops','eod','file');
+    load([apath,filesep,adir,filesep,adir,'_archieve'],'frame');
+end
+setenv('PXLSIZE',num2str(ops.pxlsize)); %pxl to mm conversion
+pxl2mm=ops.pxlsize;
+
+%hpf filter
+lp=100*2/ops.samplerate;
+[NN, Wn] = buttord( lp, lp .* [0.75], 3, 20);
+[Bhp,Ahp] = butter(NN,Wn,'high');
+%% general parameters 
+fdate=num2str(ops.seg(seg).dates(1));
+dname=[ops.datapath,'\',fdate,'\'];
+fname=ops.seg(seg).files(fnum); %file to take
+cvar=ops.seg(seg).LFPgroups{ops.seg(seg).Spkgroups(spkgroup)}(chid);
+% setenv('SESSDATE',num2str(date));
+% varname='group4';
+datafile=[dname,'data_',num2str(fname)];
+framenum=800; %number of frames
+frameind=ss+[0:framenum];
+
+%% get video and data files
+if(~exist('data'))
+    load(datafile);        %for traces
+end
+
+if(~exist('amp'))
+    chns=find(ops.outchans);
+    ch=chns(cvar);
+    sesspath=[ops.datapath,'\',fdate,'\'];
+    [t,amp]=read_bonsai_binary([sesspath,'amp_',num2str(fname)],ops.samplerate,ops.chan_num,ops.blocksize,ch,'adc');
+    t=t-data.FILE.offset;
+end
+
+if(~exist('frames'))
+    vidname=[dname,'video_',num2str(fname)];
+    trackfile=[dname,'video_',num2str(fname),ops.trackname];
+    vid = VideoReader([vidname,'.avi']);
+    F=figure;
+    set(F,'Color',[0 0 0],'Position',[1 41 1920 964]);
+    setenv('DATAPATH',ops.datapath);
+    setenv('SESSDATE',fdate);
+    setenv('FRAMESCALE',num2str(ops.framescale));
+%     [frames,ax_grid] = get_fish_image(varargin)
+    [frames,ax_grid]=visualize_fish_tracking(vidname,trackfile,ss,framenum)
+end
+
+%% get data stats
+f_ind=[frame(seg).ind0(fnum):frame(seg).ind0(fnum+1)-1]; %frame indices for file
+f_ind=f_ind(frameind);
+fdata=frame(seg).data0(f_ind,:);    %frame data for file
+ft=frame(seg).t(f_ind,:);  %frame time
+eind=[eod(seg).ind0(fnum):eod(seg).ind0(fnum+1)-1];   %eod indices for file
+edata=eod(seg).data(eind,:);   %eod data for file
+et=eod(seg).t(eind,:);    %eod time
+%% get variables
+%frame data
+fx=fdata(:,1)*pxl2mm; fx=(fx-nanmin(fx))/(nanmax(fx)-nanmin(fx));
+fy=fdata(:,2)*pxl2mm;  fy=(fy-nanmin(fy))/(nanmax(fy)-nanmin(fy));
+fa=fdata(:,3)/pi;
+acc=fdata(:,11:13);
+[coef,score,latent,tqs,explained]=pca(acc);
+rfin=fdata(:,9)/2; rfin=rfin-nanmedian(rfin);
+lfin=fdata(:,10)/2; lfin=lfin-nanmedian(lfin);
+tpos=mean(fdata(:,7:8),2);
+
+% find frames with eod
+clear frind Tr idx;
+iii=find(et>=ft(1) & et<=ft(end));
+clear rind;
+rast=cell(1,numel(rastind));
+for i=1:numel(rastind)
+    rind{i}=find(ismember(eod(seg).raster{rastind(i)}(:,2),eind(iii)) & inrange(eod(seg).raster{rastind(i)}(:,1),[0.001 .025]));
+    rast{i}=[rast{i};eod(seg).raster{rastind(i)}(rind{i},1) eod(seg).raster{rastind(i)}(rind{i},2)-eind(iii(1))+1];
+end
+%correct missing spikes
+mspikes=[7.467e-3 1;17.63e-3 55;11.83e-3 87;16.37e-3 87];
+rast{2}=sortrows([rast{2};mspikes],2)
+e=1; frind=[]; idx=[];
+while(e<=numel(iii))
+    [m,i]=min(abs(ft-et(iii(e)))); %find frame closest to eod
+    frind=[frind i];
+    Tr(e,:)=data.EOD.traces(iii(e),:,cvar);
+    e=e+1;
+end
+idx=iii;
+edata=edata(idx,:);
+%eod data
+et=et(idx);
+frate=1./edata(:,1);
+% lfp=(edata(:,14+ops.seg(seg).Spkgroups(spkgroup))*eod(seg).LFPs(ch(1)) + eod(seg).LFPm(ch(1)))/1e3;
+sc=edata(:,23:24);
+%add missing spikes
+sc(1,2)=sc(1,2)+1;
+sc(55,2)=sc(55,2)+1;
+sc(87,2)=sc(87,2)+2;
+
+%% get traces
+Ix=[30:25*30];
+ind=find(ismember(t,et))'; %eod indices in t
+Idx=ind*ones(size(Ix))+ones(size(ind))*Ix;    
+Tr=amp(Idx)/1e3;
+Tr=filtfilt(Bhp,Ahp,Tr')';
+Trx=Ix/ops.samplerate*1e3;
+LFP_t=4.5;
+Itr=find(inrange(Trx,[1 LFP_t]));
+lfp=max(Tr(:,Itr),[],2)-min(Tr(:,Itr),[],2);
+
+%% get rasters
+Sp=nan([size(Tr) numel(rast)]);
+for i=1:size(Sp,3)
+    for j=1:size(rast{i},1)
+        spk=rast{i}(j,:);
+        is=round(spk(1)*3e4-30)+[-15:30];
+        is(is>size(Sp,2))=[];
+        Sp(spk(2),is,i)=Tr(spk(2),is);
+    end
+end
+%% grid 
+%allocentric
+% Rcirc=300;
+% [X,Y]=meshgrid(ax_grid{1}*pxl2mm,ax_grid{2}*pxl2mm);
+% mask=(((X-x0).^2/rx^2+(Y-y0).^2/ry^2)<1);
+% immask=repmat(uint8(((X-x0).^2+(Y-y0).^2)<Rcirc^2)*255,1,1,3);
+
+%% play decoder
+vidpath='C:\Users\sawte\Dropbox\efish_paper\Rev2 Final\Videos\';
+vidout=VideoWriter([vidpath,'WallachSawtell2023_MovieS1'],'MPEG-4');
+framerate=15;
+vidout.FrameRate=framerate;
+vidout.Quality=50;
+open(vidout);
+
+F1=figure;
+set(F1,'Position',[7 61 984 552]);
+set(F1,'Color',[0 0 0]);
+COL=colormap('lines');
+COL(4,:)=[226 139 138]/255; %afferent color
+COL(5,:)=[64 128 0]/255;%[57 181 74]/255; output color
+COL(6,:)=[210 148 37]/255;%COL(7,:);%interneuron
+COL(7,:)=[86 124 141]/255;%output color
+rsymbol=[char(0x2B24) char(0x25AE)];
+colormap('parula');
+%% title page
+title_image=imread('C:\Users\sawte\Dropbox\efish_paper\Videos\rec_vid_title.png');
+A=axes('Position',[0 0 1 .95],'Color',[0 0 0]);
+imshow(title_image);
+A2=axes('Position',[0 0 1 .95],'Color','none','XColor','none','YColor','none');
+R=rectangle('Position',[0 0 1 1],'LineStyle','none','FaceColor',[0 0 0 1]);
+d_1s=linspace(0,1,framerate);
+for i=1:framerate
+    R.FaceColor=[0 0 0 1-d_1s(i)];
+    writeVideo(vidout,getframe(F1));    
+end
+for i=1:framerate*2
+    writeVideo(vidout,getframe(F1));    
+end
+for i=1:framerate
+    R.FaceColor=[0 0 0 d_1s(i)];
+    writeVideo(vidout,getframe(F1));    
+end
+delete(A);
+delete(R);
+%%
+
+A1=axes('XTick',[],'YTick',[],'Color',[0 0 0]);
+set(A1,'Position',[.01 0.11 0.35 0.815]);
+L0=annotation('textbox','String','0.3X Speed','Color',[1 1 1],'FontSize',18,'Position',[0.01 0.18 0.35 0.1],'LineStyle','none');
+x0=.67; w0=.25;
+A2=axes;
+set(A2,'Position',[ x0,0.21,w0,0.3],'XTick',[5:5:25],'YTick',[-.5:.25:.5],'Color',[0 0 0],...
+    'XColor',[1 1 1],'XAxisLocation','bottom','YColor',[1 1 1],'FontSize',14);
+hold on;
+A4=axes;
+set(A4,'Position',[ x0,0.51,w0,0.35],'XTick',[],'XTickLabelMode','auto','YTick',[],'Color',[0 0 0],'XColor','none','YColor',[1 1 1]);
+colormap(A4,'pink');
+CB=colorbar('north');
+set(CB,'AxisLocation','out','Color',[1 1 1],'Position',[0.67 0.87 0.037 0.015],'Ticks',[-.5 0 .5],'TickLabels',[-.5 0 .5],'FontSize',10);        
+Llfp=annotation('textbox','String','LFP (mV)','Color',COL(4,:),'FontSize',14);
+set(Llfp,'Units','normalized','Position',[0.64 0.935 0.1 0.05],'LineStyle','none','HorizontalAlignment','center','FontWeight','bold');
+Lrast=annotation('textbox','String','Spike Raster','Color',[1 1 1],'FontSize',14);
+set(Lrast,'Units','normalized','Position',[0.735 0.935 0.2 0.05],'LineStyle','none','HorizontalAlignment','center','FontWeight','bold');
+
+xlabel(A2,'Time after EOD (ms)','FontSize',14,'Color',[1 1 1],'FontWeight','bold');
+
+A5=axes;
+set(A5,'Position',[ .37,0.21,.2,0.65]);
+[hb,pb]=tight_subplot(3, 1, [.0 .0],[.0 .00],[.00 .0],[.4 .4 .2],[],A5); %Nh, Nw, [gap_h gap_w], [lower upper], [left right]
+set(hb(:),'Color',[0 0 0],'XColor','none','YColor',[1 1 1]);
+xlabel(hb(3),'Time (s)','FontSize',14,'Color',[1 1 1],'FontWeight','bold');
+hold on;
+[hc,pc]=split_axes(hb(1),4,1,0.0,0.005);
+set(hc(:),'Color',[0 0 0],'XColor',[1 1 1],'YColor',[1 1 1],'XTick',[],'YTick',[]);
+L(1)=annotation('textbox','String','Tail','Color',COL(1,:),'FontSize',14);
+L(2)=annotation('textbox','String','Roll','Color',COL(11,:),'FontSize',14);
+L(3)=annotation('textbox','String','Pitch','Color',COL(11,:),'FontSize',14);
+L(4)=annotation('textbox','String','R Fin','Color',COL(3,:),'FontSize',14);
+L(5)=annotation('textbox','String','L Fin','Color',COL(3,:),'FontSize',14);
+x0=0.29; dy=0.055; y0=0.495
+for i=1:5
+    set(L(i),'Units','normalized','Position',[x0 y0-(i-1)*dy .1 0.1],'LineStyle','none','HorizontalAlignment','center','FontWeight','bold');
+end
+
+L1(1)=annotation('textbox','String','Y','Color',COL(7,:),'FontSize',14);
+L1(2)=annotation('textbox','String','X','Color',COL(7,:),'FontSize',14);
+L1(3)=annotation('textbox','String','Azim','Color',COL(7,:),'FontSize',14);
+x0=0.29; dy=0.0375; y0=0.235;
+for i=1:3
+    set(L1(i),'Units','normalized','Position',[x0 y0-(i-1)*dy .1 0.1],'LineStyle','none','HorizontalAlignment','center','FontWeight','bold');
+end
+
+N=10; %number of LFP amps to display
+H=[];
+r=[];
+zt=[];
+[X,Y]=meshgrid(1:size(frames(1).cdata,2),1:size(frames(1).cdata,1));
+x0=415; y0=375; R=400;
+blnkind=find(((X-x0).^2 + (Y-y0).^2)>R^2);
+trind=[];
+for j=5:750;%numel(frames)
+
+    axes(A1);
+    cla(A1);
+    hold on;
+    Im=frames(j).cdata;
+    for d=1:3
+        CD=Im(:,:,d);
+        CD(blnkind)=0;
+        Im(:,:,d)=CD;    
+    end
+    imshow(Im);
+
+    %LFP traces
+    if(ismember(j,frind))
+        axes(A2);        
+        cla(A2);
+        trind=find(frind==j)+[-3:0];
+        trind(trind<1)=[];
+        H=plot(Trx,Tr(trind,:));
+        set(H(1:end-1),'LineWidth',2,'Color',0.25*[1 1 1]);
+        set(H(end),'LineWidth',3,'Color',1*[1 1 1]); 
+        H1=plot(Trx(Itr),Tr(trind(end),Itr));        
+        set(H1,'LineWidth',3,'Color',COL(4,:));
+        for s=1:size(Sp,3)
+            S=plot(Trx,Sp(trind(end),:,s));
+            set(S,'LineWidth',3,'Color',COL(4+s,:));
+        end
+        H0=plot(Trx,zeros(size(Trx)));
+        set(H0,'LineWidth',1,'Color',[1 1 1]);
+    end
+    set(A2,'Xlim',[min(Trx) max(Trx)],'Ylim',[min(Tr(:)) max(Tr(:))]);
+    ylabel(A2,'Voltage trace (mV)','FontSize',14,'Color',[1 1 1],'FontWeight','bold');
+    
+    %raster
+    if(ismember(j,frind))
+        axes(A4);
+        cla(A4);                    
+        %lfp image
+        I=imagesc(Trx(Itr),1:trind(end),Tr(1:trind(end),Itr));
+        hold on;
+        colormap('pink');        
+        mkr='od';
+        for s=1:numel(rast) 
+            ind=find(rast{s}(:,2)<=trind(end));
+            TT=scatter(rast{s}(ind,1)*1e3,rast{s}(ind,2),30,COL(4+s,:),'filled',mkr(s));            
+        end
+        yspan=20;
+        ymax=max(trind(end)+.5,yspan); ymin=max(0,trind(end)-yspan);
+        set(A4,'Xlim',[1 max(Trx)],'Ylim',[ymin ymax],'Clim',[-.300 .600]);  
+        set(A4,'YDir','reverse','FontSize',14,'XColor','none','YColor',[1 1 1],'YTick',[0:10:1e3],'XTick',[],'FontSize',14,'Color',[0 0 0],'Box','off')
+        ylabel(A4,'EOD #','FontSize',14,'Color',[1 1 1],'FontWeight','bold');        
+        if(~isvalid(CB))
+            CB=colorbar('north');
+        end
+        set(CB,'AxisLocation','out','Color',[1 1 1],'Position',[0.67 0.87 0.037 0.015],'Ticks',[-.5 0 .5],'TickLabels',{'-.5','0','0.5'},'FontSize',10,'TickLength',.1,'TickDirection','out');        
+    end
+    
+    %vars
+    wline=2;
+    axes(hb(3));
+    hb(3).clo;
+    k=0;
+    H=plot(ft(1:j)-ft(1),fa(1:j)+k);
+    hold on;
+    set(H,'LineWidth',wline,'Color',COL(7,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),fx(1:j)+k);
+    set(H,'LineWidth',wline,'Color',COL(7,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),(1-fy(1:j))+k);
+    set(H,'LineWidth',wline,'Color',COL(7,:));
+    tspan=5;
+    tmin=max(0,ft(j)-ft(1)-tspan); tmax=max(tspan,ft(j)-ft(1));
+    tlim=[tmin tmax];
+    set(hb(3),'FontSize',14,'YTick',[],'Xlim',tlim,'Ylim',[-.5 3.5],'Box','off','Xtick',[0:1:16],'XColor',[1 1 1],'XTickLabelMode','auto');
+    
+    axes(hb(2));
+    hb(2).clo;
+    k=0;
+    H=plot(ft(1:j)-ft(1),-lfin(1:j)+k);
+    hold on;
+    set(H,'LineWidth',wline,'Color',COL(3,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),-rfin(1:j)+k);
+    set(H,'LineWidth',wline,'Color',COL(3,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),score(1:j,1)+k);
+    set(H,'LineWidth',wline,'Color',COL(11,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),score(1:j,2)+k);
+    set(H,'LineWidth',wline,'Color',COL(11,:));
+    k=k+1;
+    H=plot(ft(1:j)-ft(1),tpos(1:j)+k);
+    set(H,'LineWidth',wline,'Color',COL(1,:));
+    set(hb(2),'FontSize',14,'YTick',[],'Xlim',tlim,'Ylim',[-.2 4.5],'XTick',[],'Box','off','Color',[0 0 0],'YColor',[1 1 1],'XColor','none');
+
+    if(ismember(j,frind))    
+        msize=20;
+        axes(hc(4));
+        hc(4).clo;
+        H=plot(et(1:trind(end))-ft(1),frate(1:trind(end)),'.:');
+        set(H,'MarkerSize',msize,'Color',COL(2,:),'MarkerFaceColor',COL(2,:));
+        set(hc(4),'FontSize',14,'Xlim',tlim,'Box','off','XTick',[],'Ylim',[5 14],'YTick',[],'Color',[0 0 0],'YColor',[1 1 1]);
+        ylabel(hc(4),'Rate','FontSize',14,'Color',COL(2,:),'Units','normalized','Position',[-0.15 .1 -1],'Rotation',0,'FontWeight','bold');
+
+        axes(hc(3));
+        hc(3).clo;
+        H=plot(et(1:trind(end))-ft(1),lfp(1:trind(end)),'.:');
+        set(H,'MarkerSize',msize,'Color',COL(4,:),'MarkerFaceColor',COL(4,:));
+        set(hc(3),'FontSize',14,'Xlim',tlim,'Box','off','XTick',[],'Ylim',[.5 1.2],'YTick',[],'Color',[0 0 0],'YColor',[1 1 1]);
+        ylabel(hc(3),'LFP','FontSize',14,'Color',COL(4,:),'Units','normalized','Position',[-0.15 .1 -1],'Rotation',0,'FontWeight','bold');
+
+        axes(hc(2));
+        hc(2).clo;
+        H=stem(et(1:trind(end))-ft(1),sc(1:trind(end),1));
+        set(H,'Color',COL(5,:),'Marker','.','MarkerSize',msize,'Color',COL(5,:),'LineWidth',wline);
+        set(hc(2),'FontSize',14,'Xlim',tlim,'Box','off','XTick',[],'Ylim',[0 3],'YTick',[],'Color',[0 0 0],'YColor',[1 1 1]);
+        ylabel(hc(2),'Unit2','FontSize',14,'Color',COL(5,:),'Units','normalized','Position',[-0.15 .1 -1],'Rotation',0,'FontWeight','bold');
+
+        axes(hc(1));
+        hc(1).clo;
+        H=stem(et(1:trind(end))-ft(1),sc(1:trind(end),2));
+        set(H,'Color',COL(6,:),'Marker','d','MarkerSize',msize/5,'Color',COL(6,:),'LineWidth',wline,'MarkerFaceColor',COL(6,:));
+        set(hc(1),'FontSize',14,'Xlim',tlim,'Box','off','XTick',[],'Ylim',[0 12],'YTick',[],'Color',[0 0 0],'YColor',[1 1 1]);
+        ylabel(hc(1),'Unit1','FontSize',14,'Color',COL(6,:),'Units','normalized','Position',[-0.15 .1 -1],'Rotation',0,'FontWeight','bold');
+    end
+    set(hc(:),'Xlim',tlim);
+    writeVideo(vidout,getframe(F1));    
+%     frames1(j)=getframe(F1);
+end
+
+close(vidout);
